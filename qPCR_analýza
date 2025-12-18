@@ -1,0 +1,426 @@
+library(jsonlite)
+library(tidyverse)
+library(tibble)
+library(janitor)
+library(ggplot2)
+library(plotly)
+library(dplyr)
+bakterie <- read.table("C:/Users/42072/Documents/Tym_projekt_matbio/table_bnt_norm(in).csv",
+                       sep = ",",
+                       header = TRUE,
+                       row.names = 1,
+                       quote = "",
+                       stringsAsFactors = FALSE)
+bakterie <- clean_names(bakterie)
+names(bakterie) <- gsub("^x_", "", names(bakterie))
+bakterie$id <- gsub('""', "", bakterie$id)
+df <- bakterie
+df_mean <- df %>%
+  group_by(id) %>%
+  summarise(bacteria_norm = mean(bacteria_norm, na.rm = TRUE))
+head(df_mean)
+puvodni_bakterie <- df_mean %>%
+  rename(patient_id = id)
+
+
+
+
+snimky_cesta <- ("C:/Users/42072/Documents/Tym_projekt_matbio/exports_bacteria_meta")
+pozadi_cesta <- ("C:/Users/42072/Documents/Tym_projekt_matbio/exports_background_meta")
+
+
+soubory_b <- (list.files(path = snimky_cesta, pattern = "\\.json", full.names = TRUE))
+csv_priprava_b <- soubory_b %>%
+  map_dfr(function(x) {
+    d <- fromJSON(x, flatten = FALSE)
+    d_vyber <- d %>%
+      tibble(
+        image_name = d$image_name,
+        total_area_µm2 = d$`total_area_µm2`)
+    return(d_vyber %>% slice(1))
+  })
+csv_priprava_b <- csv_priprava_b %>%
+  select(-1)
+
+soubory_p <- (list.files(path = pozadi_cesta, pattern = "\\.json", full.names = TRUE))
+csv_priprava_p <- soubory_p %>%
+  map_dfr(function(x) {
+    d <- fromJSON(x, flatten = FALSE)
+    d_vyber <- d %>%
+      tibble(
+        image_name = d$image_name,
+        total_area_µm2 = d$`total_area_µm2`
+      )
+    return(d_vyber %>% slice(1))
+  })
+csv_priprava_p <- csv_priprava_p %>%
+  select(-1)
+
+csv_ke_zpracovani <- merge(
+  csv_priprava_b,
+  csv_priprava_p,
+  by = "image_name",
+  all = TRUE
+)
+
+write_csv(csv_ke_zpracovani, "csv_ke_zpracovani.csv")
+
+normalizovane_area_meta <- csv_ke_zpracovani %>%
+  mutate(
+    normalizovana_plocha = total_area_µm2.x/total_area_µm2.y
+  )
+load("C:/Users/42072/Documents/Tym_projekt_matbio/qPCR_PanelII_20250511.Rdata")
+
+
+
+# Úprava názvů sloupců
+df <- normalizovane_area_meta
+normalizovane_area_meta <- df %>%
+  mutate(patient_id = str_extract(image_name, "CRC\\d{4}")) %>%
+  group_by(patient_id) %>%
+  summarise(prumerna_plocha = mean(normalizovana_plocha, na.rm = TRUE))
+head(normalizovane_area_meta)
+
+# Výběr relevantních sloupců
+qPCRdata <- rownames_to_column(qPCRdata, var = "patient_id")
+
+spojena_tabulka_1 <- merge(
+  qPCRdata,
+  normalizovane_area_meta,
+  by = "patient_id",
+  all = FALSE
+)
+spojena_tabulka_2 <- merge(
+  qPCRdata, 
+  puvodni_bakterie,
+  by = "patient_id",
+  all = FALSE
+)
+spojena_tabulka_k_uprave <- merge(
+  spojena_tabulka_2,
+  spojena_tabulka_1,
+  all = TRUE
+)
+spojena_tabulka <- spojena_tabulka_k_uprave %>%
+  mutate(
+    sjednocena_plocha = coalesce(bacteria_norm, prumerna_plocha)
+  ) %>%
+  filter(!is.na(sjednocena_plocha)) %>%
+  select(-bacteria_norm, -prumerna_plocha)
+head(spojena_tabulka)
+
+konstanta_x <- 0.0001
+konstanta_y <- 1
+# Vykreslení grafu pro Parvimonas
+
+spojena_tabulka <- spojena_tabulka %>%
+  mutate(
+    log_bacteria = log(sjednocena_plocha + konstanta_x),
+    log_qpcr = log(qPCR_concentration_Parvimonas + konstanta_y)
+  )
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1072")
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1106")
+
+# 2. NOVÝ MODEL NA LOGARITMOVANÝCH DATECH
+# Nyní můžeme použít lineární model (lm), protože logaritmus by měl vztah narovnat
+model_log <- lm(log_qpcr ~ log_bacteria, data = spojena_tabulka)
+
+# Získání p-hodnoty a R-squared z modelu
+summary_model <- summary(model_log)
+p_val <- summary_model$coefficients[2, 4]
+r_sq <- summary_model$r.squared
+
+p_text <- paste0("Log-Model:<br>p = ", signif(p_val, 3), 
+                 "<br>R2 = ", signif(r_sq, 3))
+
+# Predikce pro vykreslení čáry
+spojena_tabulka$pred_log <- predict(model_log)
+
+
+# 3. GRAF (LOG-LOG)
+p <- ggplot(spojena_tabulka, aes(x = log_bacteria, y = log_qpcr)) +
+  # Body
+  geom_point(aes(text = paste("Pacient:", patient_id,
+                              "<br>Původní plocha:", round(sjednocena_plocha, 10),
+                              "<br>Původní koncentrace:", round(qPCR_concentration_Parvimonas, 2),
+                              "<br>Log(Plocha):", round(log_bacteria, 2),
+                              "<br>Log(Koncentrace):", round(log_qpcr, 2))),
+             color = "magenta", size = 3) +
+  
+  # Regresní přímka (na log datech je to přímka)
+  geom_line(aes(y = pred_log), color = "lightblue4", size = 1) +
+  
+  # Popisky
+  labs(
+    x = paste0("Log(Plocha bakterií + ", konstanta_x, ")"),
+    y = paste0("Log(Koncentrace + ", konstanta_y, ")"),
+    title = "Srovnání koncentrace Parvimonas a plochy bakterií v obrazové analýze"
+  ) +
+  theme_light()
+
+# 4. INTERAKTIVNÍ VÝSTUP
+ggp <- ggplotly(p, tooltip = "text")
+ggp <- ggp %>% layout(
+  annotations = list(
+    x = 0.05, # Umístění textu vlevo nahoře (nebo změňte na 1 pro vpravo)
+    y = 1,          
+    text = p_text,
+    xref = "paper", 
+    yref = "paper", 
+    showarrow = FALSE,
+    font = list(size = 14, color = "black"),
+    align = "left"
+  )
+)
+
+ggp
+
+# Vykreslení grafu pro Aggregatibacter
+
+spojena_tabulka <- spojena_tabulka %>%
+  mutate(
+    log_bacteria = log(sjednocena_plocha + konstanta_x),
+    log_qpcr = log(qPCR_concentration_Aggregatibacter + konstanta_y)
+  )
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1072")
+# 2. NOVÝ MODEL NA LOGARITMOVANÝCH DATECH
+# Nyní můžeme použít lineární model (lm), protože logaritmus by měl vztah narovnat
+model_log <- lm(log_qpcr ~ log_bacteria, data = spojena_tabulka)
+
+# Získání p-hodnoty a R-squared z modelu
+summary_model <- summary(model_log)
+p_val <- summary_model$coefficients[2, 4]
+r_sq <- summary_model$r.squared
+
+p_text <- paste0("Log-Model:<br>p = ", signif(p_val, 3), 
+                 "<br>R2 = ", signif(r_sq, 3))
+
+# Predikce pro vykreslení čáry
+spojena_tabulka$pred_log <- predict(model_log)
+
+
+# 3. GRAF (LOG-LOG)
+p <- ggplot(spojena_tabulka, aes(x = log_bacteria, y = log_qpcr)) +
+  # Body
+  geom_point(aes(text = paste("Pacient:", patient_id,
+                              "<br>Původní plocha:", round(sjednocena_plocha, 10),
+                              "<br>Původní koncentrace:", round(qPCR_concentration_Aggregatibacter, 2),
+                              "<br>Log(Plocha):", round(log_bacteria, 2),
+                              "<br>Log(Koncentrace):", round(log_qpcr, 2))),
+             color = "magenta", size = 3) +
+  
+  # Regresní přímka (na log datech je to přímka)
+  geom_line(aes(y = pred_log), color = "lightblue4", size = 1) +
+  
+  # Popisky
+  labs(
+    x = paste0("Log(Plocha bakterií + ", konstanta_x, ")"),
+    y = paste0("Log(Koncentrace + ", konstanta_y, ")"),
+    title = "Srovnání koncentrace Aggregatibacter a plochy bakterií v obrazové analýze"
+  ) +
+  theme_light()
+
+# 4. INTERAKTIVNÍ VÝSTUP
+ggp <- ggplotly(p, tooltip = "text")
+ggp <- ggp %>% layout(
+  annotations = list(
+    x = 0.05, # Umístění textu vlevo nahoře (nebo změňte na 1 pro vpravo)
+    y = 1,          
+    text = p_text,
+    xref = "paper", 
+    yref = "paper", 
+    showarrow = FALSE,
+    font = list(size = 14, color = "black"),
+    align = "left"
+  )
+)
+
+ggp
+
+# Vykreslení grafu pro Fusobacterium
+spojena_tabulka <- spojena_tabulka %>%
+  mutate(
+    log_bacteria = log(sjednocena_plocha + konstanta_x),
+    log_qpcr = log(qPCR_concentration_Fusobacterium + konstanta_y)
+  )
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1072")
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1106")
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1045")
+
+
+# 2. NOVÝ MODEL NA LOGARITMOVANÝCH DATECH
+# Nyní můžeme použít lineární model (lm), protože logaritmus by měl vztah narovnat
+model_log <- lm(log_qpcr ~ log_bacteria, data = spojena_tabulka)
+
+# Získání p-hodnoty a R-squared z modelu
+summary_model <- summary(model_log)
+p_val <- summary_model$coefficients[2, 4]
+r_sq <- summary_model$r.squared
+
+p_text <- paste0("Log-Model:<br>p = ", signif(p_val, 3), 
+                 "<br>R2 = ", signif(r_sq, 3))
+
+# Predikce pro vykreslení čáry
+spojena_tabulka$pred_log <- predict(model_log)
+
+
+# 3. GRAF (LOG-LOG)
+p <- ggplot(spojena_tabulka, aes(x = log_bacteria, y = log_qpcr)) +
+  # Body
+  geom_point(aes(text = paste("Pacient:", patient_id,
+                              "<br>Původní plocha:", round(sjednocena_plocha, 10),
+                              "<br>Původní koncentrace:", round(qPCR_concentration_Fusobacterium, 2),
+                              "<br>Log(Plocha):", round(log_bacteria, 2),
+                              "<br>Log(Koncentrace):", round(log_qpcr, 2))),
+             color = "magenta", size = 3) +
+  
+  # Regresní přímka (na log datech je to přímka)
+  geom_line(aes(y = pred_log), color = "lightblue4", size = 1) +
+  
+  # Popisky
+  labs(
+    x = paste0("Log(Plocha bakterií + ", konstanta_x, ")"),
+    y = paste0("Log(Koncentrace + ", konstanta_y, ")"),
+    title = "Srovnání koncentrace Fusobacterium a plochy bakterií v obrazové analýze"
+  ) +
+  theme_light()
+
+# 4. INTERAKTIVNÍ VÝSTUP
+ggp <- ggplotly(p, tooltip = "text")
+ggp <- ggp %>% layout(
+  annotations = list(
+    x = 0.05, # Umístění textu vlevo nahoře (nebo změňte na 1 pro vpravo)
+    y = 1,          
+    text = p_text,
+    xref = "paper", 
+    yref = "paper", 
+    showarrow = FALSE,
+    font = list(size = 14, color = "black"),
+    align = "left"
+  )
+)
+
+ggp
+
+#Vykreslení grafu pro Prevotella
+spojena_tabulka <- spojena_tabulka %>%
+  mutate(
+    log_bacteria = log(sjednocena_plocha + konstanta_x),
+    log_qpcr = log(qPCR_concentration_Prevotella + konstanta_y)
+  )
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1072")
+
+# 2. NOVÝ MODEL NA LOGARITMOVANÝCH DATECH
+# Nyní můžeme použít lineární model (lm), protože logaritmus by měl vztah narovnat
+model_log <- lm(log_qpcr ~ log_bacteria, data = spojena_tabulka)
+
+# Získání p-hodnoty a R-squared z modelu
+summary_model <- summary(model_log)
+p_val <- summary_model$coefficients[2, 4]
+r_sq <- summary_model$r.squared
+
+p_text <- paste0("Log-Model:<br>p = ", signif(p_val, 3), 
+                 "<br>R2 = ", signif(r_sq, 3))
+
+# Predikce pro vykreslení čáry
+spojena_tabulka$pred_log <- predict(model_log)
+
+
+# 3. GRAF (LOG-LOG)
+p <- ggplot(spojena_tabulka, aes(x = log_bacteria, y = log_qpcr)) +
+  # Body
+  geom_point(aes(text = paste("Pacient:", patient_id,
+                              "<br>Původní plocha:", round(sjednocena_plocha, 10),
+                              "<br>Původní koncentrace:", round(qPCR_concentration_Prevotella, 2),
+                              "<br>Log(Plocha):", round(log_bacteria, 2),
+                              "<br>Log(Koncentrace):", round(log_qpcr, 2))),
+             color = "magenta", size = 3) +
+  
+  # Regresní přímka (na log datech je to přímka)
+  geom_line(aes(y = pred_log), color = "lightblue4", size = 1) +
+  
+  # Popisky
+  labs(
+    x = paste0("Log(Plocha bakterií + ", konstanta_x, ")"),
+    y = paste0("Log(Koncentrace + ", konstanta_y, ")"),
+    title = "Srovnání koncentrace Prevotella a plochy bakterií v obrazové analýze"
+  ) +
+  theme_light()
+
+# 4. INTERAKTIVNÍ VÝSTUP
+ggp <- ggplotly(p, tooltip = "text")
+ggp <- ggp %>% layout(
+  annotations = list(
+    x = 0.05, # Umístění textu vlevo nahoře (nebo změňte na 1 pro vpravo)
+    y = 1,          
+    text = p_text,
+    xref = "paper", 
+    yref = "paper", 
+    showarrow = FALSE,
+    font = list(size = 14, color = "black"),
+    align = "left"
+  )
+)
+
+ggp
+
+#Vykreslení grafu pro celkovou analýzu
+spojena_tabulka <- spojena_tabulka %>%
+  mutate(
+    log_bacteria = log(sjednocena_plocha + konstanta_x),
+    log_qpcr = log(UNI_Concentration + konstanta_y)
+  )
+spojena_tabulka <- subset(spojena_tabulka, patient_id != "CRC1072")
+# 2. NOVÝ MODEL NA LOGARITMOVANÝCH DATECH
+# Nyní můžeme použít lineární model (lm), protože logaritmus by měl vztah narovnat
+model_log <- lm(log_qpcr ~ log_bacteria, data = spojena_tabulka)
+
+# Získání p-hodnoty a R-squared z modelu
+summary_model <- summary(model_log)
+p_val <- summary_model$coefficients[2, 4]
+r_sq <- summary_model$r.squared
+
+p_text <- paste0("Log-Model:<br>p = ", signif(p_val, 3), 
+                 "<br>R2 = ", signif(r_sq, 3))
+
+# Predikce pro vykreslení čáry
+spojena_tabulka$pred_log <- predict(model_log)
+
+
+# 3. GRAF (LOG-LOG)
+p <- ggplot(spojena_tabulka, aes(x = log_bacteria, y = log_qpcr)) +
+  # Body
+  geom_point(aes(text = paste("Pacient:", patient_id,
+                              "<br>Původní plocha:", round(sjednocena_plocha, 10),
+                              "<br>Původní koncentrace:", round(UNI_Concentration, 2),
+                              "<br>Log(Plocha):", round(log_bacteria, 2),
+                              "<br>Log(Koncentrace):", round(log_qpcr, 2))),
+             color = "magenta", size = 3) +
+  
+  # Regresní přímka (na log datech je to přímka)
+  geom_line(aes(y = pred_log), color = "lightblue4", size = 1) +
+  
+  # Popisky
+  labs(
+    x = paste0("Log(Plocha bakterií + ", konstanta_x, ")"),
+    y = paste0("Log(Koncentrace + ", konstanta_y, ")"),
+    title = "Srovnání koncentrace bakterií z qPCR a plochy bakterií v obrazové analýze"
+  ) +
+  theme_light()
+
+# 4. INTERAKTIVNÍ VÝSTUP
+ggp <- ggplotly(p, tooltip = "text")
+ggp <- ggp %>% layout(
+  annotations = list(
+    x = 0.05, # Umístění textu vlevo nahoře (nebo změňte na 1 pro vpravo)
+    y = 1,          
+    text = p_text,
+    xref = "paper", 
+    yref = "paper", 
+    showarrow = FALSE,
+    font = list(size = 14, color = "black"),
+    align = "left"
+  )
+)
+
+ggp
