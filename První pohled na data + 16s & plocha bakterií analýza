@@ -1,0 +1,680 @@
+setwd("C:/Users/simar/OneDrive/Dokumenty/MUNI folder/projekt obrazky") #Nezapomeňte si předělat - kam se to ukládá!!
+
+#Zobrazení a transponování zadaných dat
+
+View(clinical)
+View(microbiome16S$tumour$norm$L5)
+View(qPCRdata)
+transpon_2 <- t(microbiome16S$tumour$norm$L5) #transponovaná tabulka microbiome tumor norm L5
+View(transpon_2)
+View(microbiome16S$tumour$proc$L5)
+View(microbiome16S$tumour$norm$L6)
+
+transpon_proc <- t(microbiome16S$tumour$proc$L5)
+View(transpon_proc) #transponovaná tabulka microbiome tumor proc L5
+
+transpon_proc_L6 <- t(microbiome16S$tumour$proc$L6)
+View(transpon_proc_L6)
+
+transpon_norm_L6 <- t(microbiome16S$tumour$norm$L6)
+View(transpon_norm_L6) #transponovaná tabulka microbiome tumor norm L6
+
+###
+
+# Spojování tabulek a snaha o vytvoření tabulek bez NA
+
+
+##Příprava na spojení tabulek
+clinical_id <- data.frame(ID = rownames(clinical), clinical, stringsAsFactors = FALSE)
+qPCRdata_id <- data.frame(ID = rownames(qPCRdata), qPCRdata, stringsAsFactors = FALSE)
+transpon_2_id <- data.frame(ID = rownames(transpon_norm_L6), transpon_norm_L6, stringsAsFactors = FALSE)
+
+
+cq1 <- merge(clinical_id, qPCRdata_id, by = "ID", all = T)
+View(cq1) #Spojení tabulek clinical a qPCR
+cqt1 <- merge(cq1, transpon_2_id, by = "ID", all = T)
+View(cqt1) #spojení všech tří tabulek
+
+cqt1_complete <- cqt1[complete.cases(cqt1), ]
+View(cqt1_complete) #tabulka s řádky ze sppjení všech tří tabulek bez NA
+
+###
+
+# Overlaps
+
+common_rows <- intersect(rownames(clinical), rownames(qPCRdata))
+overlaps <- cbind(clinical[common_rows, ], qPCRdata[common_rows, ]) #spojení společných pacientů z clinical a qPCR do 1 tabulky
+View(overlaps) #užitečné 
+
+common_rows_2 <- intersect(rownames(qPCRdata), rownames(transpon_norm_L6))
+overlaps2 <- cbind(qPCRdata[common_rows_2, ], transpon_norm_L6[common_rows_2, ]) #spojení společných pacientů qPCR a microbiome tumor norm L6 (transponované) do 1 tabulky
+View(overlaps2) 
+
+
+qt <- merge(qPCRdata, transpon_2, by = 0, all = T)
+View(qt)
+info_qt <- qt[complete.cases(qt), ] #řádky bez NA z qPCR a microbiome
+View(info_qt) #80 řádků
+
+qt6 <- merge(qPCRdata, transpon_norm_L6, by = 0, all = T) #Spojení qPCR a microbiome tumor norm L6
+View(qt6)
+qt6_no_NAs <- qt6[complete.cases(qt6),] #Tabulka qt6 bez NA
+View(qt6_no_NAs)
+
+##Tabulky
+
+library(dplyr)
+library(tidyr)
+
+qpcr_sloupce <- grep("^qPCR_concentration_", names(qt6_no_NAs), value = TRUE, ignore.case = TRUE) #Jen sloupce s qPCR_concentration_
+
+data_qpcr <- qt6_no_NAs %>%
+  select(Row.names, all_of(qpcr_sloupce)) %>% #Vybere sloupec s Row.names (= ID) a qPCR_sloupce (line 58)
+  mutate(across(-Row.names, ~ suppressWarnings(as.numeric(trimws(.))))) #Převede všechny qPCR sloupce na čísla (kromě Row.names) a odstraní mezery
+
+qPCR_info <- data_qpcr %>%
+  pivot_longer( #Z široké tabulky -> jeden řádek = jedna bakterie
+    cols = -Row.names,
+    names_to = "Bakterie", 
+    values_to = "Hodnota"
+  ) %>%
+  filter(!is.na(Hodnota) & Hodnota > 0) %>%  #Vynechá prázdné a NA hodnoty
+  mutate(Bakterie = sub("^qPCR_concentration_", "", Bakterie)) %>% #Převede názvy bakterií z qPCR_concentration_* jen na *
+  select(Pacient = Row.names, Bakterie, Hodnota) #Přejmenuje Row.names na Pacient a nechá jen tyto 3 řádky
+
+View(qPCR_info) #Tabulka pacient - qPCR_concentration_* - hodnota
+
+summary_pacient <- qPCR_info %>%
+  count(Pacient, name = "pocet_bakterii") %>%
+  arrange(desc(pocet_bakterii))
+
+View(summary_pacient) #Počet bakterií (z qPCR) na pacienta
+
+summary_bakterie <- qPCR_info %>% #Které bakterie jsou nejčastější
+  count(Bakterie, name = "pocet_pacientu") %>%
+  arrange(desc(pocet_pacientu))
+
+View(summary_bakterie)#Počet pacientů na bakterii
+
+#Grafy
+
+##UpSet plot
+
+#Instalace packages, pokud je potřeba (může se projet i když je už máte)
+if (!require("UpSetR")) install.packages("UpSetR")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("tidyr")) install.packages("tidyr")
+
+library(dplyr)
+library(tidyr)
+library(UpSetR)
+
+qpcr_cp_sloupce <- grep("^qPCR_Cp_", names(info_qt), value = TRUE, ignore.case = TRUE) #Vybere jen qPCR_Cp sloupce - jednodužší převést na 0/1 (ano/ne) systém
+
+data_cp <- info_qt %>% #Filtr jen pacienti a Cp sloupce
+  filter(grepl("^CRC", Row.names)) %>%
+  select(Pacient = Row.names, all_of(qpcr_cp_sloupce)) %>%
+  mutate(across(-Pacient, ~ suppressWarnings(as.numeric(trimws(.)))))
+
+vysledek_cp <- data_cp %>%
+  pivot_longer(
+    cols = -Pacient,
+    names_to = "sloupec",
+    values_to = "Cp"
+  ) %>%
+  filter(!is.na(Cp) & Cp > 0 & Cp < 50) %>%  #Cp < 50 (pro jistotu - přestože jsem našla nejvyšší asi 30.16)
+  mutate(
+    bakterie_qpcr = sub("^qPCR_Cp_", "", sloupec)  # jen název bakterie
+  ) %>%
+  select(Pacient, bakterie_qpcr) %>%
+  distinct()  # odstraní duplicity (pokud by byly)
+
+bakterie_vse <- unique(vysledek_cp$bakterie_qpcr)
+matice <- matrix(0, nrow = length(unique(vysledek_cp$Pacient)), ncol = length(bakterie_vse), #Matice pacienti X bakterie
+                 dimnames = list(unique(vysledek_cp$Pacient), bakterie_vse))
+
+for (i in seq_along(vysledek_cp$Pacient)) {
+  pac <- vysledek_cp$Pacient[i]
+  bak <- vysledek_cp$bakterie_qpcr[i]
+  matice[pac, bak] <- 1
+}
+
+matice_df <- as.data.frame(matice)
+View(matice_df) #Tabulka pacient bakterie a hodnoty 1 (ano) a 0(ne) - ve smyslu výskytu bakterie
+
+upset(matice_df,
+      nsets = 20,                    # top 20 nejčastějších bakterií - změna čísel nic neovlivní
+      nintersects = 40,              # top 40 kombinací - změna čísla nic neovlivní
+      order.by = "freq",             # seřazení podle počtu
+      decreasing = TRUE,
+      main.bar.color = "steelblue",  
+      sets.bar.color = "darkorange", 
+      matrix.color = "steelblue",    
+      text.scale = c(1.3, 1.2, 1, 1, 1.3, 1.2),  # [title, sets, bars, matrix, labels, numbers]
+      mb.ratio = c(0.6, 0.4),        # 60% hlavní, 40% sety
+      set_size.show = TRUE,
+      set_size.angle = 90,
+      mainbar.y.label = "Počet pacientů s kombinací",
+      sets.x.label = "Počet pacientů s bakterií"
+)
+
+###
+
+##Heatmapy
+
+
+#Heatmapa L5
+if (!require("gplots")) install.packages("gplots")
+if (!require("RColorBrewer")) install.packages("RColorBrewer")
+if (!require("dplyr")) install.packages("dplyr")
+library(gplots)
+library(RColorBrewer)
+library(dplyr)
+
+heat_matrix <- as.matrix(transpon_norm) #z tabulky transpon_norm udělá matici
+
+heat_matrix <- apply(heat_matrix, 2, function(x) as.numeric(as.character(x))) #číselný formát
+rownames(heat_matrix) <- rownames(transpon_norm)
+colnames(heat_matrix) <- colnames(transpon_norm)
+
+crc_rows <- grepl("CRC", rownames(heat_matrix), ignore.case = TRUE) #Výběr pacientů
+heat_matrix <- heat_matrix[crc_rows, , drop = FALSE]
+
+cat("Počet CRC pacientů:", nrow(heat_matrix), "\n")
+cat("Počet bakterií:", ncol(heat_matrix), "\n")
+
+top_n_bakterii <- 50  #Omezení na top x bakterií - dá se upravit dle potřeby
+top_bakterie <- names(sort(colSums(heat_matrix > 0, na.rm = TRUE), decreasing = TRUE)[1:top_n_bakterii])
+heat_matrix <- heat_matrix[, top_bakterie, drop = FALSE]
+
+
+# Použijeme vlastní gradient s 100 odstíny
+my_palette <- colorRampPalette(c("red", "white", "blue"))(100)
+
+# --- 7. HEATMAP.2() – PROFESIONÁLNÍ VZHLED ---
+png("16S_heatmap_transpon_norm_YELLOW_GREEN_BLUE.png",  #ukládá graf do obrázku
+    width = 20, height = 15, units = "in", res = 300)
+
+heatmap.2(
+  x = heat_matrix_log,
+  Rowv = TRUE,           # klastrování pacientů
+  Colv = TRUE,           # klastrování bakterií
+  dendrogram = "both",   #Dendogram na obou stranách
+  scale = "none",        #Data už jsou log-transformovaná
+  col = my_palette,
+  density.info = "none", #Nezobrazuje hustotu hodnot
+  trace = "none",
+  margins = c(12, 14),   # více místa na jména
+  cexRow = 0.75,         # jména pacientů
+  cexCol = 0.85,         # jména bakterií
+  srtCol = 45,           # otočení jmen bakterií
+  key = TRUE,
+  key.title = NA,
+  labRow = rownames(heat_matrix),
+  labCol = colnames(heat_matrix),
+  main = paste0("16S rRNA: Normalizovaná abundance bakterií\n",
+                "Top ", ncol(heat_matrix), " bakterií | ", nrow(heat_matrix), " CRC pacientů"),
+  colsep = 0:ncol(heat_matrix),  #oddělení - lepší přehlednost
+  rowsep = 0:nrow(heat_matrix),
+  sepcolor = "gray90",
+  sepwidth = c(0.03, 0.03),
+  offsetRow = 0.2,
+  offsetCol = 0.2,
+  lhei = c(1.8, 6.5),    # více místa na heatmapu
+  lwid = c(1.8, 4),
+  keysize = 1.0,
+  key.par = list(cex = 0.8)
+)
+
+dev.off()
+
+cat("Heatmapa uložena jako: 16S_heatmap_transpon_norm_YELLOW_GREEN_BLUE.png\n")
+shell.exec("16S_heatmap_transpon_norm_YELLOW_GREEN_BLUE.png")  #Otevře obrázek v defaultním prohlížeči na Windows
+system("open 16S_heatmap_transpon_norm_YELLOW_GREEN_BLUE.png") #Mělo by otevřít obrázek na Macu
+
+
+###
+
+library(gplots)
+library(RColorBrewer)
+library(dplyr)
+
+#Heatmapa L6
+heat_matrix <- as.matrix(transpon_norm_L6) #Převod na matice
+
+# Zajištění číselného formátu
+heat_matrix <- apply(heat_matrix, 2, function(x) as.numeric(as.character(x)))
+rownames(heat_matrix) <- rownames(transpon_norm_L6)
+colnames(heat_matrix) <- colnames(transpon_norm_L6)
+
+# --- 4. FILTROVÁNÍ: jen pacienti s "CRC" ---
+crc_rows <- grepl("CRC", rownames(heat_matrix), ignore.case = TRUE)
+heat_matrix <- heat_matrix[crc_rows, , drop = FALSE]
+
+cat("Počet CRC pacientů po filtru:", nrow(heat_matrix), "\n")
+
+# --- 5. OMEZ NA TOP BAKTERIE (L6 úroveň – obvykle méně, ale přesto doporučeno) ---
+top_n_bakterii <- 50  # ← uprav podle potřeby (např. 30–60)
+top_bakterie <- names(sort(colSums(heat_matrix > 0, na.rm = TRUE), decreasing = TRUE)[1:top_n_bakterii])
+heat_matrix <- heat_matrix[, top_bakterie, drop = FALSE]
+
+
+# --- 7. BAREVNÁ PALETA: ŽLUTÁ → ZELENÁ → MODRÁ ---
+my_palette <- colorRampPalette(c(
+  "#FFFFCC",  # velmi světle žlutá
+  "#CCFF99",  # světle zelenožlutá
+  "#66CC99",  # světle zelená
+  "#339966",  # střední zelená
+  "#006633",  # tmavě zelená
+  "#003366",  # modrozelená
+  "#000099"   # tmavě modrá
+))(100)
+
+# --- 8. HEATMAP.2() – PUBLIKAČNÍ KVALITA ---
+png("16S_L6_heatmap_transpon_norm_L6.png", 
+    width = 22, height = 16, units = "in", res = 300)  # 6600×4800 px
+
+heatmap.2(
+  x = heat_matrix,
+  Rowv = TRUE,                    # klastrování pacientů
+  Colv = TRUE,                    # klastrování bakterií
+  dendrogram = "both",
+  scale = "none",
+  col = my_palette,
+  density.info = "none",
+  trace = "none",
+  margins = c(14, 16),            # [dole, vlevo] – hodně místa na jména
+  cexRow = 0.8,                   # velikost jmen pacientů
+  cexCol = 0.9,                   # velikost jmen bakterií
+  srtCol = 45,                    # otočení jmen bakterií
+  key = TRUE,
+  key.title = NA,
+  key.xlab = "log₁₀(Normalizovaná abundance + 1e-6)",
+  key.ylab = "",
+  labRow = rownames(heat_matrix),
+  labCol = colnames(heat_matrix),
+  main = paste0("16S rRNA (L6): Normalizovaná abundance bakterií\n",
+                "Top ", ncol(heat_matrix), " taxonů | ", nrow(heat_matrix), " CRC pacientů"),
+  colsep = 0:ncol(heat_matrix),
+  rowsep = 0:nrow(heat_matrix),
+  sepcolor = "white",
+  sepwidth = c(0.04, 0.04),
+  offsetRow = 0.3,
+  offsetCol = 0.3,
+  lhei = c(1.8, 7),               # více místa na heatmapu
+  lwid = c(2, 4.5),
+  keysize = 1.0,
+  key.par = list(cex = 0.8),
+  fontsize = 10
+)
+
+dev.off()
+
+cat("Heatmapa uložena jako: 16S_L6_heatmap_transpon_norm_L6.png\n")
+shell.exec("16S_L6_heatmap_transpon_norm_L6.png")  # Windows: otevře obrázek
+
+###
+
+
+## Interaktivní PCoA s qPCR a 16s rRNA v toolbaru a s tabulkou s daty s PCO 1 a 2
+
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("vegan")) install.packages("vegan")
+if (!require("plotly")) install.packages("plotly")
+
+library(tidyverse)
+library(vegan)
+library(plotly)
+
+
+patients <- qt6_no_NAs[[1]]  # první sloupec
+qt6_data <- qt6_no_NAs %>% select(-1)  # zbytek = numerické 16S a qPCR
+
+qpcr_cols <- grep("^qPCR_concentration_", colnames(qt6_data), value = TRUE) #vybere jen qPCR_concentration
+
+qpcr_summary <- qt6_data %>%
+  mutate(Patient = patients) %>%
+  mutate(
+    Pathogen_flag = ifelse(rowSums(select(., all_of(qpcr_cols)), na.rm = TRUE) > 0, "Ano", "Ne"), #Má pacient alespoň 1 patogen
+    Patogen_list = apply(select(., all_of(qpcr_cols)), 1, function(x) {
+      names(x)[which(x > 0)] %>% paste(collapse = ", ") %>% {ifelse(.=="", "Žádný", .)} #vybere názvy patogenů s hodnotou > 0, spojí je do 1 řetězce - pokud žádný není, napíše žádný
+    })
+  ) %>%
+  select(Patient, Pathogen_flag, Patogen_list)
+
+otu_matrix <- qt6_data %>% #OTU matice - jen numerické 16s sloupce
+  select(-starts_with("qPCR_")) %>%
+  select(where(is.numeric)) %>%
+  as.matrix()
+rownames(otu_matrix) <- patients
+
+min_val <- min(otu_matrix) #najde nejmenší hodnotu v celé matici
+otu_matrix_safe <- otu_matrix + abs(min_val) + 1e-6 #Vezme absolutní hodnotu nejmenšího čísla → tímto dostaneme číslo, které když přičteme, všechny hodnoty budou ≥ 0 - potřeba pro Bray-Curtis
+
+bray_dist <- vegdist(otu_matrix_safe, method = "bray") #PCoA - Bray-Curtis
+pcoa <- cmdscale(bray_dist, k = 2, eig = TRUE)
+pcoa_df <- as.data.frame(pcoa$points)
+colnames(pcoa_df) <- c("PCo1", "PCo2")
+pcoa_df$Patient <- patients  # CRC* názvy
+
+pcoa_df <- left_join(pcoa_df, qpcr_summary, by = "Patient") #Přidání qPCR info
+
+top_taxa <- colSums(otu_matrix_safe) %>% #Určení top taxonů podle celkové abundance
+  sort(decreasing = TRUE) %>%
+  head(25) %>% #dá se změnit pro lepší přehlednost - bylo na 5
+  names()
+
+top_taxa_df <- as.data.frame(otu_matrix_safe[, top_taxa]) #Seznam top taxonů pro každého pacienta
+top_taxa_df <- top_taxa_df %>%
+  rownames_to_column("Patient") %>%
+  mutate(
+    Top_taxa_list = apply(select(., all_of(top_taxa)), 1, function(x) {
+      taxa_names <- names(x)[which(x > 0)]
+      if(length(taxa_names) == 0) "Žádný"
+      else paste(taxa_names, collapse = "<br>")
+    })
+  ) %>%
+  select(Patient, Top_taxa_list)
+
+
+pcoa_df <- left_join(pcoa_df, top_taxa_df, by = "Patient") #spojení top taxonů s pcoa_df
+
+pcoa_plot <- ggplot(pcoa_df, aes(x = PCo1, y = PCo2, color = Pathogen_flag,  #interaktivní PCoA
+                                 text = paste0("Pacient: ", Patient,
+                                               "<br>qPCR patogeny: ", Patogen_list,
+                                               "<br>Top taxony: ", Top_taxa_list))) +
+  geom_point(size = 4) +
+  scale_color_manual(values = c("Ne" = "blue", "Ano" = "red")) +
+  labs(title = "PCoA mikrobiomu (16S rRNA) s top taxony",
+       x = "PCo1", y = "PCo2", color = "Patogen") +
+  theme_minimal()
+
+
+ggplotly(pcoa_plot, tooltip = "text")
+
+write.csv(pcoa_df, "PCoA_CRC_data.csv", row.names = FALSE)
+
+
+pcoa_data <- read.csv("PCoA_CRC_data.csv", stringsAsFactors = FALSE)
+
+View(pcoa_data)
+
+
+
+## Stacked barplot s více bakteriemi - !!!není perfektní!!!
+
+library(tidyverse)
+
+qpcr_cols <- grep("^qPCR_concentration_", colnames(qt6_no_NAs), value = TRUE)
+
+qpcr_summary <- qt6_no_NAs %>%
+  rename(Patient = Row.names) %>%
+  mutate(Total_qPCR = rowSums(select(., all_of(qpcr_cols)), na.rm = TRUE),
+         Pathogen_flag = ifelse(Total_qPCR > 0, "Ano", "Ne")) %>%
+  select(Patient, Pathogen_flag)
+
+r16_data <- qt6_no_NAs %>% #Příprava 16s dat 
+  rename(Patient = Row.names) %>%
+  select(-starts_with("qPCR_")) %>%
+  select(Patient, where(is.numeric))
+
+r16_long <- r16_data %>%
+  pivot_longer(-Patient, names_to = "Taxon", values_to = "Abundance") %>%
+  separate(Taxon,
+           into = c("Domain","Phylum","Class","Order","Family","Genus"),
+           sep = ";", fill = "right") %>%
+  group_by(Patient, Genus) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE), .groups = "drop")
+
+top_genera <- r16_long %>% #Malé rody -> Other
+  group_by(Genus) %>%
+  summarise(Total = sum(Abundance), .groups = "drop") %>%
+  top_n(25, Total) %>%
+  pull(Genus)
+
+r16_long <- r16_long %>%
+  mutate(Genus = ifelse(Genus %in% top_genera, Genus, "Other"))
+
+r16_long <- left_join(r16_long, qpcr_summary, by = "Patient") #Přidání hvězdiček značících výskyt patogenu z qPCR
+
+hv_pos <- r16_long %>%
+  group_by(Patient) %>%
+  summarise(y = max(Abundance, na.rm = TRUE) * 1.10,  # 10% nad maximum
+            Pathogen_flag = unique(Pathogen_flag))
+
+stacked_plot <- ggplot(r16_long, aes(x = Patient, y = Abundance, fill = Genus)) + #Stacked barplot
+  geom_bar(stat = "identity", color = NA) +  # žádné okraje segmentů
+  geom_text(
+    data = hv_pos %>% filter(Pathogen_flag == "Ano"),
+    aes(x = Patient, y = y, label = "★"),
+    color = "red", size = 6, vjust = 0, inherit.aes = FALSE
+  ) +
+  labs(title = "Složení mikrobiomu (16S rRNA) s označením pacientů s patogeny",
+       x = "Pacient",
+       y = "Relativní abundance",
+       fill = "Rod (Genus)") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    panel.grid.major.y = element_line(color = "gray90"),  # horizontální grid pro čitelnost
+    panel.grid.major.x = element_line(color = "black", size = 0.5)  # svislé čáry mezi pacienty
+  )
+
+print(stacked_plot)
+
+##
+
+pocty <- rowSums(microbiome16S$tumour$proc$L6>0)
+names(pocty) <- rownames(microbiome16S$tumour$proc$L6)
+names(pocty) <- sub(".*;", "", names(pocty))
+barplot(pocty)
+barplot(pocty, horiz = T)
+barplot(pocty, horiz = T, las = 1)
+barplot(sort(pocty), horiz = T, las = 1)
+par(mar = c(5, 15, 4, 3))
+barplot(sort(pocty), horiz = T, las = 1)
+barplot(sort(pocty/ncol(microbiome16S$tumour$proc$L6)), horiz = T, las = 1)
+poctyBakt <- colSums(microbiome16S$tumour$proc$L6>0)
+barplot(sort(poctyBakt), horiz = T, las = 1)
+
+hist(poctyBakt, breaks = 30, col = "steelblue", main = "Distribuce počtu taxonů")
+
+names(poctyBakt) <- colnames(microbiome16S$tumour$proc$L6)
+poctyBakt_sorted <- sort(poctyBakt)
+
+par(mar = c(5, 14, 4, 2))
+barplot(poctyBakt_sorted,
+        horiz = TRUE,
+        las = 1,
+        cex.names = 0.1,
+        names.arg = names(poctyBakt_sorted),
+        space = 0.4,         # ← mezera mezi sloupci
+        col = "steelblue",
+        border = "white")    # bílý okraj pro oddělení
+
+
+
+
+library(gplots)
+library(RColorBrewer)
+library(dplyr)
+
+##Převod na matice
+
+heat_matrix <- as.matrix(transpon_norm_L6)
+
+# Zajištění číselného formátu
+heat_matrix <- apply(heat_matrix, 2, function(x) as.numeric(as.character(x)))
+rownames(heat_matrix) <- rownames(transpon_norm_L6)
+colnames(heat_matrix) <- colnames(transpon_norm_L6)
+
+
+crc_rows <- grepl("CRC", rownames(heat_matrix), ignore.case = TRUE) #Pouze pacienti s CRC
+heat_matrix <- heat_matrix[crc_rows, , drop = FALSE]
+
+cat("Počet CRC pacientů po filtru:", nrow(heat_matrix), "\n")
+
+
+top_n_bakterii <- 50  # uprav podle potřeby - výběr top taxonů
+top_bakterie <- names(sort(colSums(heat_matrix > 0, na.rm = TRUE), 
+                           decreasing = TRUE)[1:top_n_bakterii])
+heat_matrix <- heat_matrix[, top_bakterie, drop = FALSE]
+
+
+
+my_palette <- colorRampPalette(c( #barevná škála
+  "blue",     # nízké hodnoty
+  "white",    # průměr (0)
+  "red"       # vysoké hodnoty
+))(200)
+
+
+png("16S_L6_heatmap_transpon_norm_L6.png",
+    width = 22, height = 16, units = "in", res = 300)
+
+heatmap.2(
+  x = heat_matrix,
+  Rowv = TRUE,
+  Colv = TRUE,
+  dendrogram = "both",
+  scale = "none",        # data už jsou normalizovaná
+  col = my_palette,
+  density.info = "none",
+  trace = "none",
+  margins = c(14, 16),
+  cexRow = 0.8,
+  cexCol = 0.9,
+  srtCol = 45,
+  key = TRUE,
+  key.title = NA,
+  key.xlab = "Z-normalizované hodnoty (z-score)",
+  key.ylab = "",
+  labRow = rownames(heat_matrix),
+  labCol = colnames(heat_matrix),
+  main = paste0("16S rRNA (L6): Standardizovaná abundance (z-score)\n",
+                "Top ", ncol(heat_matrix), " taxonů | ",
+                nrow(heat_matrix), " CRC pacientů"),
+  
+  # Důležité: počet breaků odpovídá počtu barev
+  breaks = seq(min(heat_matrix, na.rm = TRUE),
+               max(heat_matrix, na.rm = TRUE),
+               length.out = 201),
+  
+  colsep = 0:ncol(heat_matrix),
+  rowsep = 0:nrow(heat_matrix),
+  sepcolor = "white",
+  sepwidth = c(0.04, 0.04),
+  offsetRow = 0.3,
+  offsetCol = 0.3,
+  lhei = c(1.8, 7),
+  lwid = c(2, 4.5),
+  keysize = 1.0,
+  key.par = list(cex = 0.8),
+  fontsize = 10
+)
+
+dev.off()
+
+cat("Heatmapa uložena jako: 16S_L6_heatmap_transpon_norm_L6.png\n")
+shell.exec("16S_L6_heatmap_transpon_norm_L6.png")
+
+
+##################################################################################################################################
+
+#Spearmanova korelace 16s normalizované v L6 a normalizované plochy bakterií + scatterploty (s odstraněným CRC1072 - poničený sken)
+area <- read.csv("table_bnt_norm.csv")
+View(area)
+library(dplyr)
+
+area2 <- area %>% select(bacteria_norm, ID)
+View(area2)
+
+total_area <- area2 %>% #průměrná hodnota rozlohy - u pacientů je často více snímků - zprůměruje na 1 číslo
+  group_by(ID) %>%
+  summarise(mean_bacteria_norm = mean(bacteria_norm, na.rm = TRUE))
+View(total_area)
+
+View(transpon_norm_L6)
+
+total_ids <- total_area[[1]] #uložení hodnot ze sloupce ID do vektoru
+l6_ids <- rownames(transpon_norm_L6) #uložení názvů řádků (což jsou ID) do vektoru
+spolecne <- intersect(total_ids, l6_ids) #společná ID pro 16s a total_area
+total_area_spolecne <- total_area[ total_area[[1]] %in% spolecne , ] #total_area s pouze společnými IDs
+View(total_area_spolecne)
+transpon_norm_L6_spolecne <- transpon_norm_L6[ spolecne, , drop = FALSE ] #transpon_norm_L6 s jen společnými řádky
+View(transpon_norm_L6_spolecne)
+overlaps_ta_16s <- cbind(total_area_spolecne, transpon_norm_L6_spolecne) #spojená tabulka total_area_spolecne a transpon_norm_L6_spolecne obsahující jen společné pacienty
+View(overlaps_ta_16s)
+overlaps_ta_16s <- overlaps_ta_16s[overlaps_ta_16s$ID != "CRC1072", ]
+View(overlaps_ta_16s)
+
+
+
+
+bacteria_data <- overlaps_ta_16s %>%
+  select(-ID, -mean_bacteria_norm)
+View(bacteria_data)
+
+spearman_results <- apply(
+  bacteria_data,
+  2,  # po sloupcích = každá bakterie
+  function(x) {
+    cor.test(
+      overlaps_ta_16s$mean_bacteria_norm, # plocha
+      x,                            # konkrétní bakterie
+      method = "spearman",
+      exact = FALSE                 # doporučeno pro větší N
+    )
+  }
+)
+
+spearman_table <- data.frame(
+  bacteria = names(spearman_results),
+  rho = sapply(spearman_results, function(x) unname(x$estimate)),
+  p_value = sapply(spearman_results, function(x) x$p.value)
+)
+
+View(spearman_table)
+
+
+
+significant_bacteria <- spearman_table %>%
+  filter(p_value < 0.05)
+
+View(significant_bacteria)
+
+
+
+library(ggplot2)
+library(dplyr)
+
+# Předpokládám, že už máš:
+# overlaps_ta_16s  -> tabulka se sloupcem mean_bacteria_norm a jednotlivými bakteriemi
+# significant_bacteria -> tabulka s bakteriemi, které mají p_value < 0.05
+
+# otevřeme PDF pro scatterploty
+pdf("scatterplots_significant_bacteria.pdf", width = 8, height = 6)
+
+# projdeme jen signifikantní bakterie
+for (bakt_name in significant_bacteria$bacteria) {
+  
+  # scatterplot s lineární regresí
+  p <- ggplot(overlaps_ta_16s, aes(x = mean_bacteria_norm, y = .data[[bakt_name]])) +
+    geom_point(alpha = 0.6, size = 1.2) +
+    geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.8) +
+    labs(
+      x = "Průměrná normalizovaná plocha bakterií",
+      y = paste("Abundance bakterie", bakt_name),
+      title = paste("Scatterplot:", bakt_name)
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(size = 11, face = "bold"),
+      axis.title = element_text(size = 10)
+    )
+  
+  print(p)
+}
+
+dev.off()
+
