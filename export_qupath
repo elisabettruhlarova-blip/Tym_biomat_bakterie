@@ -1,0 +1,168 @@
+//EXPORT KLASIFIKACÍ Z QuPath
+
+//knihovny
+import qupath.lib.objects.PathAnnotationObject
+import qupath.lib.objects.PathObjects
+import qupath.lib.roi.RoiTools
+import qupath.lib.scripting.QP
+import qupath.lib.io.GsonTools
+import java.nio.file.Files
+import java.nio.file.Paths
+
+//zabráním duálnímu spuštění
+def lockFile = new File("/tmp/qupath_pixel_batch.lock")
+if (lockFile.exists()) {
+    println "JINÝ SKRIPT UŽ BĚŽÍ – KONČÍM"
+    return
+}
+lockFile.createNewFile()
+lockFile.deleteOnExit()
+
+//nastavení
+def classifierPath = '/home/student/Documents/gram_models/gram3/classifiers/pixel_classifiers/wed3.json'
+def exportFolderPath = '/home/student/Documents/zbytek_z_meta/exports_356_obrazku_4/'
+def exportFolder = new File(exportFolderPath)
+
+//vytvoření složky, vymazání starého obsahu složky
+exportFolder.mkdirs()
+exportFolder.eachFileMatch(~/.*\.json/) { it.delete() }
+println "Exportní složka připravena: $exportFolderPath"
+
+def targetClassName = 'Positive' //případně 'Tissue' při získávání celkové plochy
+def minAreaMicrons = 1.0
+def minHoleMicrons = 1.0
+
+//pomocné funkce
+def annotationToMap(PathAnnotationObject ann, double pixelSizeµm) {
+    def roi = ann.getROI()
+    def areaPx = roi.getArea()
+    def areaµm = areaPx * pixelSizeµm * pixelSizeµm
+    return [
+        area_µm2     : areaµm,
+        area_pixels  : areaPx,
+        centroid_X   : roi.getCentroidX(),
+        centroid_Y   : roi.getCentroidY()
+    ]
+}
+
+def buildJsonResult(String imageName, List<Map> tissue, double totalArea, int count, String className) {
+    return [
+        image_name      : imageName,
+        detection_class : className,
+        total_count     : count,
+        total_area_µm2  : totalArea,
+        total_pixels    : tissue.sum { it.area_pixels },
+        tissue        : tissue
+    ]
+}
+
+//hlavní cyklus
+def project = QP.getProject()
+if (!project) {
+    println "CHYBA: Žádný projekt není otevřen!"
+    lockFile.delete()
+    return
+}
+
+def entries = project.getImageList()
+println "=== Spouštím klasifikaci na ${entries.size()} obrázků ==="
+
+entries.each { entry ->
+    def imageName = entry.getImageName()
+    println "\n--- Zpracovávám: $imageName ---"
+
+    try {
+        def imageData = entry.readImageData()
+        QP.setBatchProjectAndImage(project, imageData)
+        def server = imageData.getServer()
+
+        //vymazání dočasných anotací
+        imageData.getHierarchy().clearAll()
+
+        if (!new File(classifierPath).exists()) {
+            println " CHYBA: Classifier neexistuje: $classifierPath"
+            return
+        }
+
+        def t0 = System.currentTimeMillis()
+        def classifier = loadPixelClassifier(classifierPath)
+        if (!classifier) {
+            println " CHYBA: Nepodařilo se načíst classifier!"
+            return
+        }
+
+        //jméno klasifikátoru
+        def classifierName = "Neznámý"
+        try {
+            def metadata = classifier.getMetadata()
+            if (metadata && metadata.hasProperty('name') && metadata.name) {
+                classifierName = metadata.name
+            }
+        } catch (Exception e) {}
+        println " Classifier načten: $classifierName"
+
+        //při správném spuštění se vypíše
+        println " Spouštím pixel classifier s filtrem na třídu: '$targetClassName'"
+        createAnnotationsFromPixelClassifier(
+            classifier,
+            minAreaMicrons,
+            minHoleMicrons,
+            [targetClassName] as String[]
+        )
+
+        def t1 = System.currentTimeMillis()
+        println " Klasifikace hotova za: ${String.format('%.1f', (t1-t0)/1000)} s"
+
+        //rozdělení objektů
+        def hierarchy = imageData.getHierarchy()
+        def positiveAnns = hierarchy.getAnnotationObjects()
+                                    .findAll { it.getPathClass()?.getName() == targetClassName }
+
+        def splitAnnotations = []
+        positiveAnns.each { ann ->
+            RoiTools.splitROI(ann.getROI()).each { splitRoi ->
+                splitAnnotations << PathObjects.createAnnotationObject(splitRoi, ann.getPathClass())
+            }
+        }
+
+        hierarchy.removeObjects(positiveAnns, true)
+        hierarchy.addObjects(splitAnnotations)
+
+        positiveAnns = hierarchy.getAnnotationObjects()
+                                .findAll { it.getPathClass()?.getName() == targetClassName }
+        println " Nalezeno anotací '$targetClassName' (po rozdělení): ${positiveAnns.size()}"
+
+        //plocha a export
+        def cal = server.getPixelCalibration()
+        double pixelSizeµm = cal.getPixelWidthMicrons()
+        if (pixelSizeµm <= 0) pixelSizeµm = 1.0
+
+        List<Map> tissue = []
+        double totalArea = 0.0
+
+        positiveAnns.each { ann ->
+            def map = annotationToMap(ann, pixelSizeµm)
+            tissue << map
+            totalArea += map.area_µm2
+        }
+
+        //uložení json
+        def result = buildJsonResult(imageName, tissue, totalArea, tissue.size(), targetClassName)
+        def jsonFile = new File(exportFolder, imageName + ".json")
+
+        try {
+            def jsonText = GsonTools.getInstance(true).toJson(result)
+            Files.write(Paths.get(jsonFile.absolutePath), jsonText.getBytes("UTF-8"))
+            println " ULOŽENO: ${jsonFile.name} → ${tissue.size()} objektů, ${String.format('%.2f', totalArea)} µm²"
+        } catch (Exception e) {
+            println " CHYBA PŘI UKLÁDÁNÍ: ${jsonFile.name} → ${e.message}"
+        }
+
+    } catch (Exception e) {
+        println " CHYBA u $imageName: ${e.message}"
+        e.printStackTrace()
+    }
+}
+
+println "\n=== HOTOVO! JSONy jsou v: $exportFolderPath ==="
+lockFile.delete()
