@@ -239,7 +239,13 @@ table_bnt_norm$tumor<-str_split_fixed(table_bnt_norm$slide, "-",3)[,2]
 ###############################################################################################################################################################################
 #GRAFY PLOCH
 ###############################################################################################################################################################################
-#HISTOGRAM PLOCH BAKTERIÍ
+#HISTOGRAM ploch bakterií
+ggplot(summary_table_1, aes(x = total_area_µm2)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(title = "Histogram ploch",
+       x = "Plocha bakterií (µm2)",
+       y = "Počet")
+#HISTOGRAM normalizovaných ploch bakterií
 ggplot(table_bnt_norm, aes(x = bacteria_norm)) +
   geom_histogram(bins = 30, fill = "steelblue", color = "white") +
   labs(title = "Histogram ploch",
