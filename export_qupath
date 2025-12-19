@@ -19,8 +19,8 @@ lockFile.createNewFile()
 lockFile.deleteOnExit()
 
 //nastavení
-def classifierPath = '/home/student/Documents/gram_models/gram3/classifiers/pixel_classifiers/wed3.json'
-def exportFolderPath = '/home/student/Documents/zbytek_z_meta/exports_356_obrazku_4/'
+def classifierPath = 'path_to_classifier'
+def exportFolderPath = 'path_to_export_folder'
 def exportFolder = new File(exportFolderPath)
 
 //vytvoření složky, vymazání starého obsahu složky
