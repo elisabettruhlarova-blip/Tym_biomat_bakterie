@@ -1,0 +1,377 @@
+#knihovny
+library(tidyverse)
+library(grid)
+library(VennDiagram)
+library(dplyr)
+library(purrr)
+library(jsonlite)
+library(stringr)
+library(tools)
+library(ggplot2)
+library(glue)
+
+#načtu si data
+#clinical
+load("path")
+#qPCR
+load("path")
+#microbiome (16S rRNA)
+load("path")
+
+#spojím si všechny tabulky do jedné podle pacientů
+microbiome_L6 <- t(microbiome16S$tumour$norm$L6)
+tabulka_cq <- merge (clinical, qPCRdata, by = 0, all = T)
+rownames(tabulka_cq) <- tabulka_cq$Row.names
+tabulka_cq <- tabulka_cq[, -1]
+tabulka_cqm <- merge (tabulka_cq, microbiome_L6, by = 0, all = T)
+rownames(tabulka_cqm) <- tabulka_cqm$Row.names
+tabulka_cqm <- tabulka_cqm[, -1]
+#cqm jako clinical+qPCR+microbiome
+#write.csv(tabulka_cqm, "cqm_table.csv", row.names = TRUE)
+
+###############################################################################################################################################################################
+
+###############################################################################################################################################################################
+#MICROBIOME
+###############################################################################################################################################################################
+#udělám si tabulku pouze s druhovými názvy bakterií
+microbiome.species <- as.data.frame(microbiome_L6)
+names(microbiome.species) <- sapply(strsplit(names(microbiome.species), ";"), function(x) tail(x, 1))
+#View(microbiome.species)
+
+#udělám si tabulku se všemi bakteriemi pro každého pacienta
+names(microbiome.species) <- make.unique(names(microbiome.species))
+bakterie_u_pacienta <- microbiome.species %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Pacient") %>%
+  pivot_longer(-Pacient, names_to = "Bakterie", values_to = "Mnozstvi")
+
+#vytvořím heatmapu výskytu jednotlivých bakterií u pacientů
+    #používám normalizovaná data
+ggplot(bakterie_u_pacienta, aes(x = Bakterie, y = Pacient, fill = Mnozstvi)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(
+    title = "Výskyt bakterií u pacientů",
+    x = "Pacient",
+    y = "Bakterie",
+    fill = "Množství"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6), # rotace jmen pacientů
+    axis.text.y = element_text(size = 5),   # zmenšení názvů bakterií
+    plot.title = element_text(hjust = 0.5), # zarovnání názvu doprostřed
+    panel.grid = element_blank()
+  )
+
+###############################################################################################################################################################################
+
+###############################################################################################################################################################################
+#CLINICAL
+###############################################################################################################################################################################
+#uložím si pacienty s vybranými hodnotami nějakých proměnných
+male_patients <- clinical[clinical$gender == "Male", ]
+female_patients <- clinical[clinical$gender == "Female", ]
+
+location_rectum <- clinical[clinical$localization.specific == "rectum", ]
+location_right <- clinical[clinical$localization.specific == "right", ]
+location_left <- clinical[clinical$localization.specific == "left", ]
+location_colontraversum <- clinical[clinical$localization.specific == "colon traversum", ]
+
+KRAS_wt <- clinical[clinical$KRAS == "KRASwt", ]
+
+male_patient_codes <- rownames(male_patients)
+female_patient_codes <- rownames(female_patients)
+
+location_rectum_codes <- rownames(location_rectum)
+location_right_codes <- rownames(location_right)
+location_left_codes <- rownames(location_left)
+location_colontraversum_codes <- rownames(location_colontraversum)
+
+KRAS_wt_codes <- rownames(KRAS_wt)
+
+males_w_rectum <- intersect(male_patient_codes, location_rectum_codes)
+males_w_right <- intersect(male_patient_codes, location_right_codes)
+males_w_left <- intersect(male_patient_codes, location_left_codes)
+
+right_KRASwt <- intersect(location_right_codes, KRAS_wt_codes)
+left_KRASwt <- intersect(location_left_codes, KRAS_wt_codes)
+rectum_KRASwt <- intersect(location_rectum_codes, KRAS_wt_codes)
+colontraversum_KRASwt <- intersect(location_colontraversum_codes, KRAS_wt_codes)
+
+#vennovy diagramy
+grid.newpage()
+#lze doplnit jiné proměnné
+grid.draw(
+  venn.diagram(
+    x = list(colon_traversum = location_colontraversum_codes, KRASwt = KRAS_wt_codes), #tady si pak dosazuji, co chci srovnávat
+    fill = c("skyblue", "lightgreen"),
+    alpha = 0.5,
+    cat.cex = 1.2,
+    main = "",
+    filename = NULL
+  )
+)
+
+###############################################################################################################################################################################
+
+###############################################################################################################################################################################
+#PLOCHY BAKTERIÍ, NEKRÓZ A POZADÍ
+###############################################################################################################################################################################
+#detekce bakterií z QuPath
+read_all_jsons <- function(folder_path) {
+  #najdu všechny JSON soubory ve složce
+  json.files <- list.files(folder_path, pattern = "\\.json$", full.names = TRUE)
+  #načtu a spojím je všechny do jedné tabulky
+  json_data <- json.files %>%
+    map(fromJSON, flatten = TRUE) %>%
+    bind_rows()
+  return(json_data)
+}
+jsony <- read_all_jsons("folder_path_to_bacteria_areas")
+#View(jsony)
+
+#tabuka s oblastmi bakterií pro jednotlivá sklíčka
+create_total_area_table_1 <- function(folder_path) {
+  #najdu všechny JSON soubory ve složce
+  files <- list.files(folder_path, pattern = "\\.json$", full.names = TRUE)
+  #z každé složky si vyberu hodnoty total_area
+  total_areas <- map_dbl(files, function(f) {
+    data <- fromJSON(f, flatten = TRUE)
+    if (is.data.frame(data)) {
+      data$total_area_µm2[1]
+    } else if ("total_area_µm2" %in% names(data)) {
+      data$total_area_µm2
+    } else {
+      NA
+    }
+  })
+  #úprava jmen slidů
+  slides <- file_path_sans_ext(basename(files))
+  slides <- sapply(strsplit(slides, "-"), function(x) paste(x[1:3], collapse = "-"))
+  #vytvoření data framu, kde slidy jsou v prvním sloupci a jako názvy řádků je jen číslování
+  df <- data.frame(slides = slides, total_area_µm2 = total_areas)
+  return(df)
+}
+folder_1 <- "folder_path_to_bacteria_areas"
+summary_table_1 <- create_total_area_table_1(folder_1)
+#odstranění pacienta CRC1072 z důvodu nepodařeného skenu
+summary_table_1 <- summary_table_1 %>%
+  filter(slides != "CRC1072-T01-06")
+#View(summary_table_1)
+
+#plochy nekróz z MIKAII
+necrosis_areas_data <- read.csv("path_to_necrosis_areas", header = TRUE, sep = ",", stringsAsFactors = FALSE)
+#View(necrosis_areas_data)
+
+#Připravím si krátké názvy i ve druhé tabulce
+necrosis_areas_data <- necrosis_areas_data %>%
+  mutate(slides_short = sapply(strsplit(as.character(slide), "-"), 
+                               function(x) paste(x[1:3], collapse = "-")))
+#už mám krátké názvy v summary_table_1
+summary_table_1 <- summary_table_1 %>%
+  mutate(slides_short = slides)
+
+#provedu spojení jen tam, kde se shodují zkrácené názvy
+merged_table_necrosis_bacteria <- inner_join(summary_table_1, necrosis_areas_data, 
+                                             by = "slides_short")
+merged_table_necrosis_bacteria <- merged_table_necrosis_bacteria %>%
+  select(slides, total_area_µm2, area_um2)
+colnames(merged_table_necrosis_bacteria) <- c("slide", "bacteria_area", "necrosis_area")
+#View(merged_table_necrosis_bacteria)
+
+###############################################################################################################################################################################
+
+###############################################################################################################################################################################
+#NORMALIZACE PLOCH
+###############################################################################################################################################################################
+#k normalizaci ploch je třeba znát celkovou plochu
+bg_area_table <- list.files("path_to_backround_areas", pattern = "\\.json$", full.names = TRUE) %>%
+  map_df(~ fromJSON(.x, flatten = TRUE))
+bg_area <- bg_area_table %>%
+  select(image_name, detection_class, total_area_µm2, total_pixels) %>%
+  group_by(image_name) %>%
+  slice(1) %>%
+  ungroup() %>%
+  rename(slide = image_name) %>%
+  mutate(
+    #necháme všechno po druhou pomlčku
+    slide = str_extract(slide, "^([^\\-]*-){2}[^\\-]*")
+  )
+#View(bg_area)
+
+#spojení tabulek
+table_bnt_area <- merged_table_necrosis_bacteria %>%
+  left_join(
+    bg_area %>%
+      select(slide, tissue_area = total_area_µm2),
+    by = "slide"
+  )
+
+#úpravy a nové sloupce
+table_bnt_norm <- table_bnt_area %>%
+  mutate(
+    bacteria_norm = bacteria_area / tissue_area
+  )
+table_bnt_norm <- table_bnt_norm %>%
+  mutate(
+    necrosis_norm = necrosis_area / tissue_area
+  )
+table_bnt_norm <- table_bnt_norm %>%
+  mutate(
+    bacteria_log = log10(bacteria_norm)
+  )
+table_bnt_norm <- table_bnt_norm %>%
+  mutate(
+    necrosis_log = log10(necrosis_norm)
+  )
+table_bnt_norm <- table_bnt_norm %>%
+  mutate(
+    bacteria_necrosis_log_difference = bacteria_log - necrosis_log
+  )
+table_bnt_norm$ID<-str_split_fixed(table_bnt_norm$slide, "-",3)[,1]
+table_bnt_norm$block<-str_split_fixed(table_bnt_norm$slide, "-",3)[,3]
+table_bnt_norm$tumor<-str_split_fixed(table_bnt_norm$slide, "-",3)[,2]
+
+###############################################################################################################################################################################
+
+###############################################################################################################################################################################
+#GRAFY PLOCH
+###############################################################################################################################################################################
+#HISTOGRAM ploch bakterií
+ggplot(summary_table_1, aes(x = total_area_µm2)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(title = "Histogram ploch",
+       x = "Plocha bakterií (µm2)",
+       y = "Počet")
+#HISTOGRAM normalizovaných ploch bakterií
+ggplot(table_bnt_norm, aes(x = bacteria_norm)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(title = "Histogram ploch",
+       x = "Normalizovaná plocha bakterií",
+       y = "Počet")
+#omezeno na plochy z častějším výskytem podle předchozího histogramu
+min(table_bnt_norm$bacteria_norm)
+max(table_bnt_norm$bacteria_norm)
+ggplot(table_bnt_norm, aes(x = bacteria_norm)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  coord_cartesian(xlim = c(0, 4.5e-5)) +
+  labs(title = "Histogram ploch",
+       x = "Normalizovaná plocha bakterií",
+       y = "Počet")
+
+###############################################################################################################################################################################
+#SCATTER PLOT zlogaritmovaná data
+ggplot(table_bnt_norm, aes(x = bacteria_log, y = necrosis_log)) +
+  geom_point(color = "violet", size = 2) +
+  labs(
+    x = "bacteria_log",
+    y = "necrosis_log",
+    title = "bacteria and necrosis area"
+  ) +
+  theme_minimal()
+
+######################################################################################################################
+#SCATTER PLOT
+ggplot(table_bnt_norm, aes(x = bacteria_norm, y = necrosis_norm)) +
+  geom_point(color = "violet", size = 2) +
+  labs(
+    x = "bacteria_norm",
+    y = "necrosis_norm",
+    title = "bacteria and necrosis area"
+  ) +
+  theme_minimal()
+
+
+######################################################################################################################
+#LINE CHART
+vyrovnanigrafu_mean <- table_bnt_norm$necrosis_log + mean(table_bnt_norm$bacteria_necrosis_log_difference)
+vyrovnanigrafu_median <- table_bnt_norm$necrosis_log + median(table_bnt_norm$bacteria_necrosis_log_difference)
+plot(
+  table_bnt_norm$bacteria_log,
+  type = "o",
+  col = "hotpink",
+  xaxt = "n",
+  xlab = " ",
+  ylab = " ",
+  ylim = range(c(table_bnt_norm$bacteria_log, table_bnt_norm$necrosis_log))
+)
+#názvy sklíček
+axis(
+  1,
+  at = 1:nrow(table_bnt_norm),
+  labels = table_bnt_norm$slide,
+  las = 2,
+  tick = TRUE
+)
+#necrosis area log
+lines(table_bnt_norm$necrosis_log, type = "o", col = "lightblue")
+lines(vyrovnanigrafu_mean, type = "o", col = "lightgreen")
+#or
+#lines(vyrovnanigrafu_median, type = "o", col = "yellow")
+
+######################################################################################################################
+# BAR PLOT
+par(mar = c(10, 4, 4, 2))
+barplot(
+  rbind(table_bnt_norm$bacteria_log, table_bnt_norm$necrosis_log),
+  beside = FALSE,
+  col = c("hotpink", "lightblue"),
+  names.arg = table_bnt_norm$slide,
+  ylim = c(0, max(table_bnt_norm$bacteria_log + table_bnt_norm$necrosis_log) * 1.1),
+  #legend.text = c("bacteria", "necrosis"),
+  #args.legend = list(x = "topright"),
+  border = "black",
+  las = 2
+)
+
+###############################################################################################################################################################################
+
+###############################################################################################################################################################################
+#KORELACE PLOCH BAKTERIÍ S 16S rRNA DATY
+###############################################################################################################################################################################
+microbiome_L6_patients <- cbind(patients = rownames(microbiome_L6), microbiome_L6)
+microbiome_L6_patients <- as.data.frame(microbiome_L6_patients)
+bacteria_patients_norm <- table_bnt_norm[, c("ID", "bacteria_norm")]
+colnames(bacteria_patients_norm)[colnames(bacteria_patients_norm) == "ID"] <- "patients"
+bacteria_patients_norm <- bacteria_patients_norm %>% 
+  group_by(patients) %>% 
+  summarize(
+    mean_bacteria_norm = mean(bacteria_norm),
+    .groups = "drop"
+  )
+merged_table_bacteria_microbiome_norm <- inner_join(bacteria_patients_norm, microbiome_L6_patients, 
+                                                    by = "patients")
+
+#příklad pro Fusobacterium
+cor.test(merged_table_bacteria_microbiome_norm$mean_bacteria_norm, as.numeric(merged_table_bacteria_microbiome_norm$`Bacteria;Fusobacteriota;Fusobacteriia;Fusobacteriales;Fusobacteriaceae;Fusobacterium`), method = "spearman", exact = FALSE)
+#tabulka korelací
+#vstup: merged_table_bacteria_microbiome_norm
+#sloupec, proti kterému počítáme korelace (2. sloupec = normalizovaná plocha bakterii vzhledek k celkové ploše nádoru)
+x <- merged_table_bacteria_microbiome_norm[[2]]
+#sloupce pro korelace (3. až poslední)
+testing_cols <- names(merged_table_bacteria_microbiome_norm)[3:ncol(merged_table_bacteria_microbiome_norm)]
+#příprava výsledkové tabulky
+rho_vector <- numeric(length(testing_cols))
+pval_vector <- numeric(length(testing_cols))
+#cyklus pro testování
+for (i in seq_along(testing_cols)) {
+  col_name <- testing_cols[i]
+  y <- as.numeric(merged_table_bacteria_microbiome_norm[[col_name]])
+  test <- cor.test(x, y, method = "spearman", exact = FALSE)
+  rho_vector[i] <- test$estimate
+  pval_vector[i] <- test$p.value
+}
+#finální tabulka
+result_table <- rbind(
+  rho = rho_vector,
+  p_value = pval_vector
+)
+#nastavení názvů sloupců
+colnames(result_table) <- testing_cols
+result_table <- t(result_table)
+
+###############################################################################################################################################################################
+
+###############################################################################################################################################################################
